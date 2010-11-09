@@ -1,0 +1,24 @@
+name:     hastur
+version:  0.1
+cabal-version: >=1.6
+build-type: Simple
+data-files: LICENSE README
+            res/icons/*.ico
+data-dir: ""
+author:   James d'Arcy
+maintainer: james.darcy@wraithbane.com
+copyright: 2010 James d'Arcy
+license:  BSD3
+license-file: LICENSE
+category: Application
+synopsis: Application to exercise dicomh library
+description: Application to exercise dicomh library
+
+executable hastur
+  build-depends:   base >= 4 && < 5, wx >= 0.12, wxcore >= 0.12, filepath >= 1.1,
+                   directory >= 1, HDBC >= 2.2, HDBC-sqlite3 >= 2.3, hslogger >= 1.1,
+                   containers >= 0.3, haskell98, dicomh >= 0.1
+  hs-source-dirs:  src
+  main-is:         Hastur.hs
+--  ghc-options:     -optl-mwindows
+  other-modules:   Hastur.DB
