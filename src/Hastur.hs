@@ -60,16 +60,20 @@ import Paths_hastur
 
 type ListDbMap = Map.Map Int Int64
 
-data HasturContext = HasturCtx {
-  guiFrame :: Frame (),
-  guiDbTable :: ListCtrl (),
-  guiSeriesList :: ListCtrl (),
-  guiText :: TextCtrl (),
-  guiStatus :: StatusField,
+data HasturContext = HasturContext {
+  guiWidgets :: HasturWidgets,
   dbStudyMap :: Var (ListDbMap),
   dbSeriesMap :: Var (ListDbMap),
   appDataDir :: Var (FilePath),
   dbFile :: Var (FilePath)
+}
+
+data HasturWidgets = HasturWidgets {
+  guiFrame :: Frame (),
+  guiDbTable :: ListCtrl (),
+  guiSeriesList :: ListCtrl (),
+  guiText :: TextCtrl (),
+  guiStatus :: StatusField
 }
 
 main :: IO ()
@@ -93,13 +97,20 @@ gui = do
     style := wxLC_SINGLE_SEL .|. wxLC_REPORT .|. wxLC_HRULES]
   wgVSplit <- splitterWindow wgHSplit []
   wgSeriesList <- listCtrl wgVSplit []
-  wgText <- textCtrl wgVSplit []
+  dispPanel <- panel wgVSplit []
+  noteBook <- notebook dispPanel []
+  sliderPanel <- panel dispPanel []
+  imageSlider <- hslider sliderPanel False 0 1 []
+  rawTab <- panel noteBook []
+  imageTab <- panel noteBook []
+  wgText <- textCtrl rawTab []
   studyIdMap <- varCreate Map.empty
   seriesIdMap <- varCreate Map.empty
   appDataDir <- varCreate ""
   dbFile <- varCreate ""
 
-  let guiCtx = HasturCtx wgFrame wgDbTable wgSeriesList wgText wgStatus studyIdMap seriesIdMap appDataDir dbFile
+  let widgets = HasturWidgets wgFrame wgDbTable wgSeriesList wgText wgStatus
+  let guiCtx = HasturContext widgets studyIdMap seriesIdMap appDataDir dbFile
 
   -- Study "table"
   set wgDbTable [on listEvent := onDbTableEvent guiCtx]
@@ -124,9 +135,19 @@ gui = do
   quit <- menuQuit file [help := "Quit"]
   set quit [on command := close wgFrame]
 
-  set wgFrame [layout := fill $
-                           hsplit wgHSplit 3 400 (widget wgDbTable)
-                             (vsplit wgVSplit 3 400 (widget wgSeriesList) (widget wgText))]
+  set wgFrame [layout :=
+                 fill $ hsplit wgHSplit 3 400 (widget wgDbTable)
+                   (vsplit wgVSplit 3 400 (widget wgSeriesList) $
+                     container dispPanel $ column 0
+                     [ tabs noteBook $
+                       [ tab "Raw" $ container rawTab $ fill (widget wgText),
+                         tab "Image" $ container imageTab $ glue
+                       ],
+                       hfill $ minsize (sz 20 80) $ container sliderPanel $ 
+                         hfill $ widget imageSlider
+                     ]
+                   )
+              ]
   hasturIcon <- imageFile "blackmage.ico"
   set wgFrame [menuBar    := [file],
                statusBar  := [wgStatus],
@@ -200,34 +221,33 @@ noDots path = not $ (isPrefixOf "." path) || (isPrefixOf ".." path)
 
 --
 onDbTableEvent :: HasturContext -> EventList -> IO ()
-onDbTableEvent HasturCtx {guiDbTable=wgDbTable, guiSeriesList=wgSeriesList, dbStudyMap=studyIdMap, dbSeriesMap=seriesIdMap, dbFile=dbf} event =
+onDbTableEvent HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbSeriesMap=seriesIdMap, dbFile=dbf} event =
   case event of
     ListItemSelected idx -> do
-      studyId <- listCtrlGetItemData wgDbTable idx
+      studyId <- listCtrlGetItemData (guiDbTable hxw) idx
       idMap <- varGet studyIdMap
       let maybePk = Map.lookup studyId idMap
       case maybePk of
         Just studyPk -> do
           dbFile <- varGet dbf
           dbConn <- connectDb dbFile
-          showSeries dbConn studyPk seriesIdMap wgSeriesList
+          showSeries dbConn studyPk seriesIdMap (guiSeriesList hxw)
           propagateEvent
         Nothing      -> propagateEvent
-    otherwise            ->
-      propagateEvent
+    otherwise        -> propagateEvent
 
 --
 onOpenFile :: HasturContext -> IO ()
-onOpenFile HasturCtx {guiFrame=wgFrame, guiText=wgText} = do
-  maybePath <- fileOpenDialog wgFrame True True "Open Image" [("Dicom files",["*.dcm"]),("All files",["*.*"])] "" ""
+onOpenFile HasturContext {guiWidgets=hxw} = do
+  maybePath <- fileOpenDialog (guiFrame hxw) True True "Open Image" [("Dicom files",["*.dcm"]),("All files",["*.*"])] "" ""
   case maybePath of
     Nothing   -> return ()
-    Just path -> importDicomFile wgText path
+    Just path -> importDicomFile (guiText hxw) path
 
 --
 onImport :: HasturContext -> IO ()
-onImport HasturCtx{guiFrame=wgFrame, guiText=wgText, guiDbTable=wgDbTable, dbStudyMap=studyIdMap, dbFile=dbf} = do
-  maybePath <- dirOpenDialog wgFrame False "" "E:\\User\\Plootarg\\DicomData\\MR\\DicomH"
+onImport HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbFile=dbf} = do
+  maybePath <- dirOpenDialog (guiFrame hxw) False "" "E:\\User\\Plootarg\\DicomData\\MR\\DicomH"
   case maybePath of
     Nothing   -> return ()
     Just path -> do
@@ -236,14 +256,14 @@ onImport HasturCtx{guiFrame=wgFrame, guiText=wgText, guiDbTable=wgDbTable, dbStu
       wxcBeginBusyCursor
       scanDirectory dbConn False path
       wxcEndBusyCursor
-      showStudies dbConn studyIdMap wgDbTable
+      showStudies dbConn studyIdMap $ guiDbTable hxw
       disconnect dbConn
       infoM "Hastur" $ "Done scanning " ++ path
 
 --
 onImportRecurse :: HasturContext -> IO ()
-onImportRecurse HasturCtx {guiFrame=wgFrame, guiText=wgText, guiDbTable=wgDbTable, dbStudyMap=studyIdMap, dbFile=db} = do
-  maybePath <- dirOpenDialog wgFrame False "" "E:\\User\\Plootarg\\DicomData\\MR\\DicomH"
+onImportRecurse HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbFile=db} = do
+  maybePath <- dirOpenDialog (guiFrame hxw) False "" "E:\\User\\Plootarg\\DicomData\\MR\\DicomH"
   case maybePath of
     Nothing   -> return ()
     Just path -> do
@@ -252,27 +272,33 @@ onImportRecurse HasturCtx {guiFrame=wgFrame, guiText=wgText, guiDbTable=wgDbTabl
       wxcBeginBusyCursor
       scanDirectory dbConn True path
       wxcEndBusyCursor
-      showStudies dbConn studyIdMap wgDbTable
+      showStudies dbConn studyIdMap $ guiDbTable hxw
       disconnect dbConn
       infoM "Hastur" $ "Done scanning " ++ path
 
 --
 onSeriesListEvent :: HasturContext -> EventList -> IO ()
-onSeriesListEvent HasturCtx {guiSeriesList=wgSeriesList, dbSeriesMap=seriesIdMap, dbFile=dbf} event =
+onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, dbFile=dbf} event =
   case event of
     ListItemSelected idx -> do
-      seriesId <- listCtrlGetItemData wgSeriesList idx
+      seriesId <- listCtrlGetItemData (guiSeriesList hxw) idx
       idMap <- varGet seriesIdMap
       let maybePk = Map.lookup seriesId idMap
       case maybePk of
         Just seriesPk -> do
           dbFile <- varGet dbf
           dbConn <- connectDb dbFile
-          infoM "Hastur" $ "Series Int64Id: " ++ show seriesPk
+          images <- fetchImages dbConn seriesPk
+          textCtrlClear (guiText hxw)
+          mapM_ (\sop -> do
+                   textCtrlAppendText (guiText hxw) $ "\n*** DICOM: " ++ (sopInstancePath sop) ++ " ***\n"
+                   textCtrlAppendText (guiText hxw) (show sop)
+                   textCtrlAppendText (guiText hxw) "\n*** [End] ***\n") images
+          textCtrlShowPosition (guiText hxw) 0
+          disconnect dbConn
           propagateEvent
         Nothing      -> propagateEvent
-    otherwise            ->
-      propagateEvent
+    otherwise        -> propagateEvent
 
 --
 scanDirectory :: IConnection conn => conn -> Bool -> FilePath -> IO ()
@@ -290,6 +316,20 @@ scanDirectory dbConn recurse path = do
       mapM_ (scanDirectory dbConn True) dirs
       return ()
   
+--
+fetchImages :: IConnection conn => conn -> Int64 -> IO ([DicomSopInstance])
+fetchImages dbConn seriesPk = do
+  wxcBeginBusyCursor
+  images <- searchImages dbConn seriesPk
+{-  let seriesPks = map seriesPk series
+  let seriesIdMap = Map.fromList (zip [0..] seriesPks) :: ListDbMap
+  varSet varMap seriesIdMap
+  mapM_ (showSingleSeries wgSeriesList) $ zip (Map.keys seriesIdMap) series
+-}
+--  mapM_ print images
+  wxcEndBusyCursor
+  return images
+
 --
 showSeries :: IConnection conn => conn -> Int64 -> Var (ListDbMap) -> ListCtrl l -> IO ()
 showSeries dbConn studyPk varMap wgSeriesList = do

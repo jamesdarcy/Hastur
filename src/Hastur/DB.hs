@@ -41,6 +41,7 @@ module Hastur.DB
     connectDb,
     initDb,
     closeDb,
+    searchImages,
     searchSeries,
     searchStudies,
     storeDicomFileToDb
@@ -422,12 +423,12 @@ rowToSeries x = error $ "Cannot convert row to valid series"
 --------------------------------------------------------------------------------
 --
 rowToSopInstance :: [SqlValue] -> DicomSopInstance
-rowToSopInstance [svUid,svPath,svPk,svFk,svFrameCount] =
+rowToSopInstance [svUid,svPk,svFk,svPath,svFrameCount] =
   DicomSopInstance {
     sopInstanceUid = fromSql svUid,
-    sopInstancePath = fromSql svPath,
     sopInstancePk = fromSql svPk,
     seriesFk = fromSql svFk,
+    sopInstancePath = fromSql svPath,
     sopInstanceFrameCount = fromSql svFrameCount}
 rowToSopInstance x = error $ "Cannot convert row to valid SOP instance"
 
@@ -454,6 +455,32 @@ rowToStudy [svUid,svDate,svDesc,svPk,svFk,svName] =
         patientName = fromSql svName,
         patientPk = fromSql svFk}}
 rowToStudy x = error $ "Cannot convert row to valid study"
+
+--------------------------------------------------------------------------------
+--
+searchImages :: IConnection conn => conn -> Int64 -> IO ([DicomSopInstance])
+searchImages conn seriesFk = do
+  sopInst <- searchSopInstances conn seriesFk
+  let sopFk = map sopInstancePk sopInst
+  return (sopInst)
+
+--------------------------------------------------------------------------------
+--
+searchImagesBySop :: IConnection conn => conn -> Int64 -> IO ([DicomImage])
+searchImagesBySop conn sopFk = do
+  images <- quickQuery' conn
+    "SELECT uid,sop_fk,frame FROM sopinstance WHERE sop_fk=?"
+      [toSql sopFk]
+  return (map rowToImage images)
+
+--------------------------------------------------------------------------------
+--
+searchSopInstances :: IConnection conn => conn -> Int64 -> IO ([DicomSopInstance])
+searchSopInstances conn seriesFk = do
+  sopInst <- quickQuery' conn
+    "SELECT uid,pk,series_fk,path,frameCount FROM sopinstance WHERE series_fk=?"
+      [toSql seriesFk]
+  return (map rowToSopInstance sopInst)
 
 --------------------------------------------------------------------------------
 --
