@@ -290,9 +290,9 @@ onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, dbFile
           dbConn <- connectDb dbFile
           images <- fetchImages dbConn seriesPk
           textCtrlClear (guiText hxw)
-          mapM_ (\sop -> do
-                   textCtrlAppendText (guiText hxw) $ "\n*** DICOM: " ++ (sopInstancePath sop) ++ " ***\n"
-                   textCtrlAppendText (guiText hxw) (show sop)
+          mapM_ (\image -> do
+                   textCtrlAppendText (guiText hxw) $ "\n*** DICOM: " ++ (imageUid image) ++ " ***\n"
+                   textCtrlAppendText (guiText hxw) (show image)
                    textCtrlAppendText (guiText hxw) "\n*** [End] ***\n") images
           textCtrlShowPosition (guiText hxw) 0
           disconnect dbConn
@@ -317,16 +317,10 @@ scanDirectory dbConn recurse path = do
       return ()
   
 --
-fetchImages :: IConnection conn => conn -> Int64 -> IO ([DicomSopInstance])
+fetchImages :: IConnection conn => conn -> Int64 -> IO ([DicomImage])
 fetchImages dbConn seriesPk = do
   wxcBeginBusyCursor
   images <- searchImages dbConn seriesPk
-{-  let seriesPks = map seriesPk series
-  let seriesIdMap = Map.fromList (zip [0..] seriesPks) :: ListDbMap
-  varSet varMap seriesIdMap
-  mapM_ (showSingleSeries wgSeriesList) $ zip (Map.keys seriesIdMap) series
--}
---  mapM_ print images
   wxcEndBusyCursor
   return images
 

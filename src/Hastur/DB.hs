@@ -226,7 +226,7 @@ getSeriesDb conn uid = do
 getSopInstanceDb :: IConnection conn => conn -> String -> IO (Maybe DicomSopInstance)
 getSopInstanceDb conn uid = do
   sopInst <- quickQuery' conn
-    "SELECT uid,path,pk,series_fk,frameCount FROM sopinstance WHERE uid = ?"
+    "SELECT uid,pk,series_fk,path,frameCount FROM sopinstance WHERE uid=?"
     [toSql uid]
   case sopInst of
     [s] -> return (Just (rowToSopInstance s)) 
@@ -276,7 +276,7 @@ insertImageDb conn dcm fk frame = do
           emergencyM "Hastur.DB" $ "Can't retrieve image just inserted: " ++
             imageUid image
           fail $ "Can't retrieve image just inserted: " ++ imageUid image
-    Nothing         -> do
+    Nothing    -> do
       emergencyM "Hastur.DB" "Object has no SOP instance UID"
       fail "Object has no SOP instance UID"
 
@@ -287,7 +287,7 @@ insertPatientDb conn dcmPatient dcmStudy = do
   maybePatient <- getPatientDb conn $ patientFk dcmStudy
   case maybePatient of
     Just oldPatient -> return oldPatient
-    Nothing        -> do
+    Nothing         -> do
       run conn "INSERT INTO patient (name) values (?)"
         [toSql (patientName dcmPatient)]
       newPk <- getLastInsertId conn
@@ -458,18 +458,19 @@ rowToStudy x = error $ "Cannot convert row to valid study"
 
 --------------------------------------------------------------------------------
 --
-searchImages :: IConnection conn => conn -> Int64 -> IO ([DicomSopInstance])
+searchImages :: IConnection conn => conn -> Int64 -> IO ([DicomImage])
 searchImages conn seriesFk = do
   sopInst <- searchSopInstances conn seriesFk
   let sopFk = map sopInstancePk sopInst
-  return (sopInst)
+  images <- mapM (searchImagesBySop conn) sopFk
+  return $ concat images
 
 --------------------------------------------------------------------------------
 --
 searchImagesBySop :: IConnection conn => conn -> Int64 -> IO ([DicomImage])
 searchImagesBySop conn sopFk = do
   images <- quickQuery' conn
-    "SELECT uid,sop_fk,frame FROM sopinstance WHERE sop_fk=?"
+    "SELECT uid,sop_fk,frame FROM image WHERE sop_fk=?"
       [toSql sopFk]
   return (map rowToImage images)
 
@@ -553,6 +554,6 @@ storeSopInstanceToDb dbConn path dcm dcmSeries = do
   sopInst <- insertSopInstanceDb dbConn path dcm $ seriesPk dcmSeries
   let frameCount = sopInstanceFrameCount sopInst
   -- Store one image per frame of sop instance
-  mapM_ (insertImageDb dbConn dcm (seriesPk dcmSeries)) [1..frameCount]
+  mapM_ (insertImageDb dbConn dcm (sopInstancePk sopInst)) [1..frameCount]
   return ()
   
