@@ -36,6 +36,7 @@ module Main
   ) where
 
 import Control.Monad
+import Data.Array
 import Data.Bits
 import Data.Int
 import qualified Data.Map as Map
@@ -59,11 +60,13 @@ import Hastur.DB
 import Paths_hastur
 
 type ListDbMap = Map.Map Int Int64
+type ImageArray = Array Int DicomImage
 
 data HasturContext = HasturContext {
   guiWidgets :: HasturWidgets,
   dbStudyMap :: Var (ListDbMap),
   dbSeriesMap :: Var (ListDbMap),
+  imageArray :: Var (ImageArray),
   appDataDir :: Var (FilePath),
   dbFile :: Var (FilePath)
 }
@@ -72,6 +75,7 @@ data HasturWidgets = HasturWidgets {
   guiFrame :: Frame (),
   guiDbTable :: ListCtrl (),
   guiSeriesList :: ListCtrl (),
+  guiImageSlider :: Slider (),
   guiText :: TextCtrl (),
   guiStatus :: StatusField
 }
@@ -100,23 +104,28 @@ gui = do
   dispPanel <- panel wgVSplit []
   noteBook <- notebook dispPanel []
   sliderPanel <- panel dispPanel []
-  imageSlider <- hslider sliderPanel False 0 1 []
+  imageSlider <- hslider sliderPanel False 0 0 [style := wxSL_AUTOTICKS]
   rawTab <- panel noteBook []
   imageTab <- panel noteBook []
   wgText <- textCtrl rawTab []
   studyIdMap <- varCreate Map.empty
   seriesIdMap <- varCreate Map.empty
+  imageArray <- varCreate $ listArray (0,0) []
   appDataDir <- varCreate ""
   dbFile <- varCreate ""
 
-  let widgets = HasturWidgets wgFrame wgDbTable wgSeriesList wgText wgStatus
-  let guiCtx = HasturContext widgets studyIdMap seriesIdMap appDataDir dbFile
+  let widgets = HasturWidgets wgFrame wgDbTable wgSeriesList imageSlider wgText wgStatus
+  let guiCtx = HasturContext widgets studyIdMap seriesIdMap imageArray appDataDir dbFile
 
   -- Study "table"
   set wgDbTable [on listEvent := onDbTableEvent guiCtx]
   -- Series list
   set wgSeriesList [columns := [("Series",AlignLeft,400)],
                     on listEvent := onSeriesListEvent guiCtx]
+  -- Image slider
+  set imageSlider [on command := onImageSlider guiCtx,
+                   enabled := False]
+
   -- Display area
   textCtrlSetEditable wgText False
 
@@ -170,8 +179,15 @@ gui = do
   showStudies dbConn studyIdMap wgDbTable
   closeDb dbConn
 
--- | This function takes a name and, with a little knowledge and the help of
---   cabal, returns the path of that image
+-- 
+clearSeriesSelection :: TextCtrl () -> Slider () -> IO ()
+clearSeriesSelection wgText imageSlider = do
+  textCtrlClear wgText
+  sliderSetRange imageSlider 0 0
+  set imageSlider [enabled := False]
+
+-- This function takes a name and, with a little knowledge and the help of
+-- cabal, returns the path of that image
 imageFile :: String -> IO FilePath
 imageFile img = getDataFileName $ "res" </> "icons" </> img
 
@@ -224,6 +240,7 @@ onDbTableEvent :: HasturContext -> EventList -> IO ()
 onDbTableEvent HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbSeriesMap=seriesIdMap, dbFile=dbf} event =
   case event of
     ListItemSelected idx -> do
+      clearSeriesSelection (guiText hxw) (guiImageSlider hxw)
       studyId <- listCtrlGetItemData (guiDbTable hxw) idx
       idMap <- varGet studyIdMap
       let maybePk = Map.lookup studyId idMap
@@ -243,6 +260,17 @@ onOpenFile HasturContext {guiWidgets=hxw} = do
   case maybePath of
     Nothing   -> return ()
     Just path -> importDicomFile (guiText hxw) path
+
+--
+onImageSlider :: HasturContext -> IO ()
+onImageSlider HasturContext {guiWidgets=hxw, imageArray=ia} = do
+  idx <- sliderGetValue $ guiImageSlider hxw
+  imageArray <- varGet ia
+  let image = imageArray ! idx
+  textCtrlSetValue (guiText hxw) $ "*** DICOM: " ++ (imageUid image) ++ " ***\n"
+  textCtrlAppendText (guiText hxw) (show image)
+  textCtrlAppendText (guiText hxw) "\n*** [End] ***"
+  textCtrlShowPosition (guiText hxw) 0  
 
 --
 onImport :: HasturContext -> IO ()
@@ -278,7 +306,7 @@ onImportRecurse HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbFile=db}
 
 --
 onSeriesListEvent :: HasturContext -> EventList -> IO ()
-onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, dbFile=dbf} event =
+onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, imageArray=ia, dbFile=dbf} event =
   case event of
     ListItemSelected idx -> do
       seriesId <- listCtrlGetItemData (guiSeriesList hxw) idx
@@ -289,12 +317,17 @@ onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, dbFile
           dbFile <- varGet dbf
           dbConn <- connectDb dbFile
           images <- fetchImages dbConn seriesPk
-          textCtrlClear (guiText hxw)
-          mapM_ (\image -> do
-                   textCtrlAppendText (guiText hxw) $ "\n*** DICOM: " ++ (imageUid image) ++ " ***\n"
-                   textCtrlAppendText (guiText hxw) (show image)
-                   textCtrlAppendText (guiText hxw) "\n*** [End] ***\n") images
-          textCtrlShowPosition (guiText hxw) 0
+          let nImages = length images
+          varSet ia $ listArray (0,nImages-1) images
+          let imageSlider = guiImageSlider hxw
+          sliderSetRange imageSlider 0 (nImages-1)
+          sliderSetValue imageSlider 0
+          set imageSlider [enabled := True]
+          let image = head images
+          textCtrlSetValue (guiText hxw) $ "*** DICOM: " ++ (imageUid image) ++ " ***\n"
+          textCtrlAppendText (guiText hxw) (show image)
+          textCtrlAppendText (guiText hxw) "\n*** [End] ***"
+          textCtrlShowPosition (guiText hxw) 0  
           disconnect dbConn
           propagateEvent
         Nothing      -> propagateEvent
