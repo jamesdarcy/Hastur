@@ -52,6 +52,7 @@ import Data.Int
 import qualified Data.Map as Map
 import Database.HDBC.Sqlite3
 import Database.HDBC
+import Graphics.UI.WX
 import System.FilePath
 import System.Log.Logger
 
@@ -87,14 +88,22 @@ data DicomSopInstance = DicomSopInstance {
   sopInstanceUid :: String,
   sopInstancePk :: Int64,
   seriesFk :: Int64,
-  sopInstanceFrameCount :: Int32
-  } deriving (Show)
+  sopInstanceFrameCount :: Int32,
+  sourceDicom :: Maybe EncapDicomObject
+  }
 
 data DicomImage = DicomImage {
   imageUid :: String,
   sopInstanceFk :: Int64,
+  sopInstance :: DicomSopInstance,
   imageFrame :: Int32
   } deriving (Show)
+
+instance Show DicomSopInstance where
+  show dsi = "DicomSopInstance { UID=\"" ++ (sopInstanceUid dsi) ++
+    "\", Key=\"" ++ show (sopInstancePk dsi) ++ "\", Series Key=\"" ++
+    show (seriesFk dsi) ++ "\", Frame Count=\"" ++ show (sopInstanceFrameCount dsi) ++
+    "\", Path=\"" ++ (sopInstancePath dsi) ++ "\" }"
 
 --------------------------------------------------------------------------------
 --
@@ -254,7 +263,8 @@ getStudyDb conn uid = do
 imageFromDicom :: DicomObject -> Int32 -> Maybe DicomImage
 imageFromDicom dcm frame =
   getSopInstanceUid dcm >>= \sopInstUid ->
-  Just (DicomImage {imageUid=sopInstUid ++ "." ++ show frame, 
+  Just (DicomImage {imageUid=sopInstUid ++ "." ++ show frame,
+                    sopInstance=nullSopInst,
                     sopInstanceFk=0,
                     imageFrame=frame})
 
@@ -383,6 +393,18 @@ nullPatient = DicomPatient { patientName="NULL", patientPk=0}
 
 --------------------------------------------------------------------------------
 --
+nullSopInst :: DicomSopInstance
+nullSopInst = DicomSopInstance {
+  sopInstancePath="",
+  sopInstanceUid="",
+  sopInstancePk=0,
+  seriesFk=0,
+  sopInstanceFrameCount=0,
+  sourceDicom=Nothing
+}
+
+--------------------------------------------------------------------------------
+--
 patientFromDicom :: DicomObject -> Maybe DicomPatient
 patientFromDicom dcm =
   getPatientName dcm >>= \name ->
@@ -394,6 +416,7 @@ rowToImage :: [SqlValue] -> DicomImage
 rowToImage [svUid,svFk,svFrame] =
   DicomImage {
     imageUid = fromSql svUid,
+    sopInstance = nullSopInst,
     sopInstanceFk = fromSql svFk,
     imageFrame = fromSql svFrame}
 rowToImage x = error $ "Cannot convert row to valid image"
@@ -429,7 +452,8 @@ rowToSopInstance [svUid,svPk,svFk,svPath,svFrameCount] =
     sopInstancePk = fromSql svPk,
     seriesFk = fromSql svFk,
     sopInstancePath = fromSql svPath,
-    sopInstanceFrameCount = fromSql svFrameCount}
+    sopInstanceFrameCount = fromSql svFrameCount,
+    sourceDicom = Nothing}
 rowToSopInstance x = error $ "Cannot convert row to valid SOP instance"
 
 --------------------------------------------------------------------------------
@@ -461,18 +485,18 @@ rowToStudy x = error $ "Cannot convert row to valid study"
 searchImages :: IConnection conn => conn -> Int64 -> IO ([DicomImage])
 searchImages conn seriesFk = do
   sopInst <- searchSopInstances conn seriesFk
-  let sopFk = map sopInstancePk sopInst
-  images <- mapM (searchImagesBySop conn) sopFk
+  images <- mapM (searchImagesBySop conn) sopInst
   return $ concat images
 
 --------------------------------------------------------------------------------
 --
-searchImagesBySop :: IConnection conn => conn -> Int64 -> IO ([DicomImage])
-searchImagesBySop conn sopFk = do
-  images <- quickQuery' conn
+searchImagesBySop :: IConnection conn => conn -> DicomSopInstance -> IO ([DicomImage])
+searchImagesBySop conn sopInst = do
+  imagesRaw <- quickQuery' conn
     "SELECT uid,sop_fk,frame FROM image WHERE sop_fk=?"
-      [toSql sopFk]
-  return (map rowToImage images)
+      [toSql (sopInstancePk sopInst)]
+  let imagesNoSop = map rowToImage imagesRaw
+  return (map (\image -> image {sopInstance = sopInst}) imagesNoSop)
 
 --------------------------------------------------------------------------------
 --

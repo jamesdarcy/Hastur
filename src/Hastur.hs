@@ -43,7 +43,7 @@ import qualified Data.Map as Map
 import Database.HDBC
 import Graphics.UI.WX
 import Graphics.UI.WXCore
-import List (isPrefixOf, zip4)
+import List (isPrefixOf)
 import System.FilePath
 import System.Directory
 import System.Log.Logger
@@ -266,11 +266,7 @@ onImageSlider :: HasturContext -> IO ()
 onImageSlider HasturContext {guiWidgets=hxw, imageArray=ia} = do
   idx <- sliderGetValue $ guiImageSlider hxw
   imageArray <- varGet ia
-  let image = imageArray ! idx
-  textCtrlSetValue (guiText hxw) $ "*** DICOM: " ++ (imageUid image) ++ " ***\n"
-  textCtrlAppendText (guiText hxw) (show image)
-  textCtrlAppendText (guiText hxw) "\n*** [End] ***"
-  textCtrlShowPosition (guiText hxw) 0  
+  showImage (guiText hxw) $ imageArray ! idx
 
 --
 onImport :: HasturContext -> IO ()
@@ -323,11 +319,7 @@ onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, imageA
           sliderSetRange imageSlider 0 (nImages-1)
           sliderSetValue imageSlider 0
           set imageSlider [enabled := True]
-          let image = head images
-          textCtrlSetValue (guiText hxw) $ "*** DICOM: " ++ (imageUid image) ++ " ***\n"
-          textCtrlAppendText (guiText hxw) (show image)
-          textCtrlAppendText (guiText hxw) "\n*** [End] ***"
-          textCtrlShowPosition (guiText hxw) 0  
+          showImage (guiText hxw) $ head images
           disconnect dbConn
           propagateEvent
         Nothing      -> propagateEvent
@@ -356,6 +348,40 @@ fetchImages dbConn seriesPk = do
   images <- searchImages dbConn seriesPk
   wxcEndBusyCursor
   return images
+
+--
+showEncapDicomObject :: TextCtrl t -> EncapDicomObject -> FilePath -> IO ()
+showEncapDicomObject textCtl dicom path = do
+  textCtrlSetValue textCtl $ "*** DICOM: " ++ path ++ " ***"
+  textCtrlAppendText textCtl (show dicom)
+  textCtrlAppendText textCtl "*** [End] ***"
+  textCtrlShowPosition textCtl 0
+
+--
+showImage :: TextCtrl t -> DicomImage -> IO ()
+showImage textCtl image = do
+  let sopInst = sopInstance image
+  let maybeEncapDicom = sourceDicom sopInst
+  case maybeEncapDicom of
+    Just encapDicom -> do
+      showEncapDicomObject textCtl encapDicom (sopInstancePath sopInst)
+      return ()
+    Nothing         -> do
+      eitherDicom <- readDicomFile $ sopInstancePath sopInst 
+      case eitherDicom of
+        Left errorMessage -> do
+          infoM "Hastur" $ "Error reading DICOM file: " ++ 
+            (sopInstancePath sopInst) ++ " - " ++ errorMessage
+          textCtrlSetValue textCtl $ "*** DICOM: " ++
+            (sopInstancePath sopInst) ++ " ***\n"
+          textCtrlAppendText textCtl errorMessage
+          textCtrlAppendText textCtl "\n*** [End] ***"
+          textCtrlShowPosition textCtl 0
+          return ()
+        Right encapDicom  -> do
+          --sopInst { sourceDicom = Just encapDicom }
+          showEncapDicomObject textCtl encapDicom (sopInstancePath sopInst)
+          return ()
 
 --
 showSeries :: IConnection conn => conn -> Int64 -> Var (ListDbMap) -> ListCtrl l -> IO ()
