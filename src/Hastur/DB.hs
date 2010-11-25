@@ -89,7 +89,7 @@ data DicomSopInstance = DicomSopInstance {
   sopInstancePk :: Int64,
   seriesFk :: Int64,
   sopInstanceFrameCount :: Int32,
-  sourceDicom :: Maybe EncapDicomObject
+  varDicom :: Var (Maybe EncapDicomObject)
   }
 
 data DicomImage = DicomImage {
@@ -109,7 +109,6 @@ instance Show DicomSopInstance where
 --
 connectDb :: FilePath -> IO Connection
 connectDb dbFile = do
---  infoM "Hastur.DB" $ "Connecting to: " ++ dbFile
   conn <- connectSqlite3 dbFile
   return conn
 
@@ -185,7 +184,9 @@ getImageDb conn uid = do
     "SELECT uid,sop_fk,frame FROM image WHERE uid = ?"
     [toSql uid]
   case image of
-    [i] -> return (Just (rowToImage i)) 
+    [i] -> do
+      newImage <- rowToImage i
+      return (Just (newImage)) 
     []  -> return Nothing
     i   -> do
       emergencyM "Hastur.DB" $ "Duplicate image for UID: " ++ uid
@@ -238,7 +239,9 @@ getSopInstanceDb conn uid = do
     "SELECT uid,pk,series_fk,path,frameCount FROM sopinstance WHERE uid=?"
     [toSql uid]
   case sopInst of
-    [s] -> return (Just (rowToSopInstance s)) 
+    [s] -> do
+      ioSopInst <- rowToSopInstance s
+      return (Just (ioSopInst)) 
     []  -> return Nothing
     s   -> do
       emergencyM "Hastur.DB" $ "Duplicate SOP instance for UID: " ++ uid
@@ -260,19 +263,23 @@ getStudyDb conn uid = do
 
 --------------------------------------------------------------------------------
 --
-imageFromDicom :: DicomObject -> Int32 -> Maybe DicomImage
-imageFromDicom dcm frame =
-  getSopInstanceUid dcm >>= \sopInstUid ->
-  Just (DicomImage {imageUid=sopInstUid ++ "." ++ show frame,
-                    sopInstance=nullSopInst,
-                    sopInstanceFk=0,
-                    imageFrame=frame})
+imageFromDicom :: DicomObject -> Int32 -> IO (Maybe DicomImage)
+imageFromDicom dcm frame = do
+  let maybeUid = getSopInstanceUid dcm
+  case maybeUid of
+    Just sopInstUid -> do
+      sopInst <- nullSopInst
+      return (Just (DicomImage {imageUid=sopInstUid ++ "." ++ show frame,
+                      sopInstance=sopInst,
+                      sopInstanceFk=0,
+                      imageFrame=frame}))
+    Nothing         -> return (Nothing)
 
 --------------------------------------------------------------------------------
 --
 insertImageDb :: IConnection conn => conn -> DicomObject -> Int64 -> Int32 -> IO (DicomImage)
 insertImageDb conn dcm fk frame = do
-  let maybeImage = imageFromDicom dcm frame
+  maybeImage <- imageFromDicom dcm frame
   case maybeImage of
     Just image -> do
       run conn "INSERT INTO image (uid,sop_fk,frame) values (?,?,?)"
@@ -393,15 +400,17 @@ nullPatient = DicomPatient { patientName="NULL", patientPk=0}
 
 --------------------------------------------------------------------------------
 --
-nullSopInst :: DicomSopInstance
-nullSopInst = DicomSopInstance {
-  sopInstancePath="",
-  sopInstanceUid="",
-  sopInstancePk=0,
-  seriesFk=0,
-  sopInstanceFrameCount=0,
-  sourceDicom=Nothing
-}
+nullSopInst :: IO (DicomSopInstance)
+nullSopInst = do
+  var <- varCreate (Nothing)
+  return (DicomSopInstance {
+            sopInstancePath = "",
+            sopInstanceUid = "",
+            sopInstancePk = 0,
+            seriesFk = 0,
+            sopInstanceFrameCount = 0,
+            varDicom = var
+          })
 
 --------------------------------------------------------------------------------
 --
@@ -412,13 +421,15 @@ patientFromDicom dcm =
 
 --------------------------------------------------------------------------------
 --
-rowToImage :: [SqlValue] -> DicomImage
-rowToImage [svUid,svFk,svFrame] =
-  DicomImage {
-    imageUid = fromSql svUid,
-    sopInstance = nullSopInst,
-    sopInstanceFk = fromSql svFk,
-    imageFrame = fromSql svFrame}
+rowToImage :: [SqlValue] -> IO DicomImage
+rowToImage [svUid,svFk,svFrame] = do
+  sopInst <- nullSopInst
+  return (DicomImage {
+            imageUid = fromSql svUid,
+            sopInstance = sopInst,
+            sopInstanceFk = fromSql svFk,
+            imageFrame = fromSql svFrame
+          })
 rowToImage x = error $ "Cannot convert row to valid image"
 
 --------------------------------------------------------------------------------
@@ -445,15 +456,17 @@ rowToSeries x = error $ "Cannot convert row to valid series"
 
 --------------------------------------------------------------------------------
 --
-rowToSopInstance :: [SqlValue] -> DicomSopInstance
-rowToSopInstance [svUid,svPk,svFk,svPath,svFrameCount] =
-  DicomSopInstance {
-    sopInstanceUid = fromSql svUid,
-    sopInstancePk = fromSql svPk,
-    seriesFk = fromSql svFk,
-    sopInstancePath = fromSql svPath,
-    sopInstanceFrameCount = fromSql svFrameCount,
-    sourceDicom = Nothing}
+rowToSopInstance :: [SqlValue] -> IO (DicomSopInstance)
+rowToSopInstance [svUid,svPk,svFk,svPath,svFrameCount] = do
+  var <- varCreate (Nothing)
+  return (DicomSopInstance {
+            sopInstanceUid = fromSql svUid,
+            sopInstancePk = fromSql svPk,
+            seriesFk = fromSql svFk,
+            sopInstancePath = fromSql svPath,
+            sopInstanceFrameCount = fromSql svFrameCount,
+            varDicom = var
+          })
 rowToSopInstance x = error $ "Cannot convert row to valid SOP instance"
 
 --------------------------------------------------------------------------------
@@ -495,7 +508,7 @@ searchImagesBySop conn sopInst = do
   imagesRaw <- quickQuery' conn
     "SELECT uid,sop_fk,frame FROM image WHERE sop_fk=?"
       [toSql (sopInstancePk sopInst)]
-  let imagesNoSop = map rowToImage imagesRaw
+  imagesNoSop <- mapM rowToImage imagesRaw
   return (map (\image -> image {sopInstance = sopInst}) imagesNoSop)
 
 --------------------------------------------------------------------------------
@@ -505,7 +518,7 @@ searchSopInstances conn seriesFk = do
   sopInst <- quickQuery' conn
     "SELECT uid,pk,series_fk,path,frameCount FROM sopinstance WHERE series_fk=?"
       [toSql seriesFk]
-  return (map rowToSopInstance sopInst)
+  mapM rowToSopInstance sopInst
 
 --------------------------------------------------------------------------------
 --

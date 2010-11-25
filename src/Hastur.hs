@@ -267,6 +267,7 @@ onImageSlider HasturContext {guiWidgets=hxw, imageArray=ia} = do
   idx <- sliderGetValue $ guiImageSlider hxw
   imageArray <- varGet ia
   showImage (guiText hxw) $ imageArray ! idx
+  return ()
 
 --
 onImport :: HasturContext -> IO ()
@@ -361,7 +362,7 @@ showEncapDicomObject textCtl dicom path = do
 showImage :: TextCtrl t -> DicomImage -> IO ()
 showImage textCtl image = do
   let sopInst = sopInstance image
-  let maybeEncapDicom = sourceDicom sopInst
+  maybeEncapDicom <- varGet $ varDicom sopInst
   case maybeEncapDicom of
     Just encapDicom -> do
       showEncapDicomObject textCtl encapDicom (sopInstancePath sopInst)
@@ -379,7 +380,7 @@ showImage textCtl image = do
           textCtrlShowPosition textCtl 0
           return ()
         Right encapDicom  -> do
-          --sopInst { sourceDicom = Just encapDicom }
+          varSet (varDicom sopInst) (Just encapDicom)
           showEncapDicomObject textCtl encapDicom (sopInstancePath sopInst)
           return ()
 
