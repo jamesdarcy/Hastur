@@ -279,20 +279,24 @@ imageFromDicom dcm frame = do
 --
 insertImageDb :: IConnection conn => conn -> DicomObject -> Int64 -> Int32 -> IO (DicomImage)
 insertImageDb conn dcm fk frame = do
-  maybeImage <- imageFromDicom dcm frame
-  case maybeImage of
-    Just image -> do
-      run conn "INSERT INTO image (uid,sop_fk,frame) values (?,?,?)"
-        [toSql (imageUid image), toSql fk, toSql (imageFrame image)]
-      maybeImage2 <- getImageDb conn $ imageUid image
-      case maybeImage2 of
-        Just newImage -> do
-          debugM "Hastur.DB" $ "New image instance for UID: " ++ imageUid image
-          return newImage
+  maybeDcmImage <- imageFromDicom dcm frame
+  case maybeDcmImage of
+    Just dcmImage -> do
+      maybeDbImage <- getImageDb conn $ imageUid dcmImage
+      case maybeDbImage of
+        Just dbImage -> do
+          debugM "Hastur.DB" $ "Pre-existing image instance for UID: " ++ imageUid dcmImage
+          return dbImage
         Nothing       -> do
-          emergencyM "Hastur.DB" $ "Can't retrieve image just inserted: " ++
-            imageUid image
-          fail $ "Can't retrieve image just inserted: " ++ imageUid image
+          run conn "INSERT INTO image (uid,sop_fk,frame) values (?,?,?)"
+            [toSql (imageUid dcmImage), toSql fk, toSql (imageFrame dcmImage)]
+          maybeDbImage2 <- getImageDb conn $ imageUid dcmImage
+          case maybeDbImage2 of
+            Just newImage -> return newImage
+            Nothing       -> do
+              emergencyM "Hastur.DB" $ "Can't retrieve image just inserted: " ++
+                imageUid dcmImage
+              fail $ "Can't retrieve image just inserted: " ++ imageUid dcmImage
     Nothing    -> do
       emergencyM "Hastur.DB" "Object has no SOP instance UID"
       fail "Object has no SOP instance UID"
