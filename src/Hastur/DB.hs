@@ -107,6 +107,11 @@ instance Show DicomSopInstance where
 
 --------------------------------------------------------------------------------
 --
+closeDb :: IConnection conn => conn -> IO ()
+closeDb conn = disconnect conn
+
+--------------------------------------------------------------------------------
+--
 connectDb :: FilePath -> IO Connection
 connectDb dbFile = do
   conn <- connectSqlite3 dbFile
@@ -162,11 +167,6 @@ initDb dbConn = do
   run dbConn "CREATE INDEX IF NOT EXISTS imageIdx12 ON image(sop_fk)" []
 
   commit dbConn
-
---------------------------------------------------------------------------------
---
-closeDb :: IConnection conn => conn -> IO ()
-closeDb conn = disconnect conn
 
 --------------------------------------------------------------------------------
 --

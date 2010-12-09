@@ -44,6 +44,7 @@ import Database.HDBC
 import Graphics.UI.WX
 import Graphics.UI.WXCore
 import List (isPrefixOf)
+import System.Exit
 import System.FilePath
 import System.Directory
 import System.Log.Logger
@@ -68,7 +69,7 @@ data HasturContext = HasturContext {
   dbSeriesMap :: Var (ListDbMap),
   imageArray :: Var (ImageArray),
   appDataDir :: Var (FilePath),
-  dbFile :: Var (FilePath)
+  dbConn :: Var (ConnWrapper)
 }
 
 data HasturWidgets = HasturWidgets {
@@ -91,7 +92,7 @@ gui :: IO ()
 gui = do
   -- Main UI components
   wgFrame <- frame [text := "Hastur",
-               clientSize := sz width height]
+                    clientSize := sz width height]
   wgHSplit <- splitterWindow wgFrame []
   wgStatus <- statusField [text := ""]
   wgDbTable <- listCtrl wgHSplit [
@@ -111,11 +112,18 @@ gui = do
   studyIdMap <- varCreate Map.empty
   seriesIdMap <- varCreate Map.empty
   imageArray <- varCreate $ listArray (0,0) []
-  appDataDir <- varCreate ""
-  dbFile <- varCreate ""
+
+  dir <- getAppUserDataDirectory "hastur"
+  appDataDir <- varCreate dir
+  createDirectoryIfMissing True dir
+  initLog dir
+  infoM "Hastur" "Hastur startup"
+  conn <- connectDb $ dir </> "hastur.db"
+  initDb conn
+  dbConn <- varCreate $ ConnWrapper conn
 
   let widgets = HasturWidgets wgFrame wgDbTable wgSeriesList imageSlider wgText wgStatus
-  let guiCtx = HasturContext widgets studyIdMap seriesIdMap imageArray appDataDir dbFile
+  let guiCtx = HasturContext widgets studyIdMap seriesIdMap imageArray appDataDir dbConn
 
   -- Study "table"
   set wgDbTable [on listEvent := onDbTableEvent guiCtx]
@@ -165,20 +173,11 @@ gui = do
   set wgFrame [picture := take (length hasturIcon) hasturIcon]
   splitterWindowSetSashPosition wgHSplit 300 True
   splitterWindowSetSashPosition wgVSplit 405 True
+
+  set wgFrame [on closing := onClose guiCtx]
+
+  showStudies conn studyIdMap wgDbTable
   
-  dir <- getAppUserDataDirectory "hastur"
-  varSet appDataDir dir
-  createDirectoryIfMissing True dir
-  initLog dir
-  infoM "Hastur" "Hastur 0.1 startup"
-
-  let dbPath = dir </> "hastur.db"
-  varSet dbFile dbPath
-  dbConn <- connectDb dbPath
-  initDb dbConn
-  showStudies dbConn studyIdMap wgDbTable
-  closeDb dbConn
-
 -- 
 clearSeriesSelection :: TextCtrl () -> Slider () -> IO ()
 clearSeriesSelection wgText imageSlider = do
@@ -236,8 +235,16 @@ noDots :: String -> Bool
 noDots path = not $ (isPrefixOf "." path) || (isPrefixOf ".." path)
 
 --
+onClose :: HasturContext -> IO ()
+onClose HasturContext {dbConn=dbc} = do
+  dbConn <- varGet dbc
+  closeDb dbConn
+  infoM "Hastur" "Hastur Shutdown"
+  exitSuccess
+
+--
 onDbTableEvent :: HasturContext -> EventList -> IO ()
-onDbTableEvent HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbSeriesMap=seriesIdMap, dbFile=dbf} event =
+onDbTableEvent HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbSeriesMap=seriesIdMap, dbConn=dbc} event =
   case event of
     ListItemSelected idx -> do
       clearSeriesSelection (guiText hxw) (guiImageSlider hxw)
@@ -246,8 +253,7 @@ onDbTableEvent HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbSeriesMap
       let maybePk = Map.lookup studyId idMap
       case maybePk of
         Just studyPk -> do
-          dbFile <- varGet dbf
-          dbConn <- connectDb dbFile
+          dbConn <- varGet dbc
           showSeries dbConn studyPk seriesIdMap (guiSeriesList hxw)
           propagateEvent
         Nothing      -> propagateEvent
@@ -271,39 +277,35 @@ onImageSlider HasturContext {guiWidgets=hxw, imageArray=ia} = do
 
 --
 onImport :: HasturContext -> IO ()
-onImport HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbFile=dbf} = do
+onImport HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbConn=dbc} = do
   maybePath <- dirOpenDialog (guiFrame hxw) False "" "E:\\User\\Plootarg\\DicomData\\MR\\DicomH"
   case maybePath of
     Nothing   -> return ()
     Just path -> do
-      dbFile <- varGet dbf
-      dbConn <- connectDb dbFile
+      dbConn <- varGet dbc
       wxcBeginBusyCursor
       scanDirectory dbConn False path
       wxcEndBusyCursor
       showStudies dbConn studyIdMap $ guiDbTable hxw
-      disconnect dbConn
       infoM "Hastur" $ "Done scanning " ++ path
 
 --
 onImportRecurse :: HasturContext -> IO ()
-onImportRecurse HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbFile=db} = do
+onImportRecurse HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbConn=dbc} = do
   maybePath <- dirOpenDialog (guiFrame hxw) False "" "E:\\User\\Plootarg\\DicomData\\MR\\DicomH"
   case maybePath of
     Nothing   -> return ()
     Just path -> do
-      dbFile <- varGet db
-      dbConn <- connectDb dbFile
+      dbConn <- varGet dbc
       wxcBeginBusyCursor
       scanDirectory dbConn True path
       wxcEndBusyCursor
       showStudies dbConn studyIdMap $ guiDbTable hxw
-      disconnect dbConn
       infoM "Hastur" $ "Done scanning " ++ path
 
 --
 onSeriesListEvent :: HasturContext -> EventList -> IO ()
-onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, imageArray=ia, dbFile=dbf} event =
+onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, imageArray=ia, dbConn=dbc} event =
   case event of
     ListItemSelected idx -> do
       seriesId <- listCtrlGetItemData (guiSeriesList hxw) idx
@@ -311,8 +313,7 @@ onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, imageA
       let maybePk = Map.lookup seriesId idMap
       case maybePk of
         Just seriesPk -> do
-          dbFile <- varGet dbf
-          dbConn <- connectDb dbFile
+          dbConn <- varGet dbc
           images <- fetchImages dbConn seriesPk
           let nImages = length images
           varSet ia $ listArray (0,nImages-1) images
@@ -321,7 +322,6 @@ onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, imageA
           sliderSetValue imageSlider 0
           set imageSlider [enabled := True]
           showImage (guiText hxw) $ head images
-          disconnect dbConn
           propagateEvent
         Nothing      -> propagateEvent
     otherwise        -> propagateEvent
