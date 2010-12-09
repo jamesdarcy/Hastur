@@ -342,7 +342,7 @@ insertSeriesDb conn dcmSeries fk = do
         Just newSeries -> do
           debugM "Hastur.DB" $ "New series for UID: " ++ (seriesUid dcmSeries)
           return newSeries
-        Nothing       -> do
+        Nothing        -> do
           emergencyM "Hastur.DB" $ "Can't retrieve series just inserted: " ++ 
             seriesUid dcmSeries
           fail $ "Can't retrieve series just inserted: " ++ 
@@ -350,30 +350,19 @@ insertSeriesDb conn dcmSeries fk = do
 
 --------------------------------------------------------------------------------
 --
-insertSopInstanceDb :: IConnection conn => conn -> FilePath -> DicomObject -> Int64 -> IO (DicomSopInstance)
+insertSopInstanceDb :: IConnection conn => conn -> FilePath -> DicomObject -> Int64 -> IO (Maybe DicomSopInstance)
 insertSopInstanceDb conn path dcm fk = do
   let maybeUid = getSopInstanceUid dcm
   case maybeUid of
-    Nothing         -> do
-      emergencyM "Hastur.DB" "Object has no SOP instance UID"
-      fail "Object has no SOP instance UID"
+    Nothing         -> return Nothing
     Just sopInstUid -> do
       maybeSopInst <- getSopInstanceDb conn sopInstUid
       case maybeSopInst of
-        Just oldSopInst -> return oldSopInst
-        Nothing        -> do
+        Just oldSopInst -> return (Just oldSopInst)
+        Nothing         -> do
           run conn "INSERT INTO sopinstance (uid,path,series_fk,frameCount) values (?,?,?,?)"
             [toSql sopInstUid, toSql path, toSql fk, toSql (getFrameCount dcm)]
-          maybeSopInst2 <- getSopInstanceDb conn sopInstUid
-          case maybeSopInst2 of
-            Just newSopInst -> do
-              debugM "Hastur.DB" $ "New SOP instance for UID: " ++ sopInstUid
-              return newSopInst
-            Nothing       -> do
-              emergencyM "Hastur.DB" $ "Can't retrieve SOP instance just inserted: " ++ 
-                sopInstUid
-              fail $ "Can't retrieve SOP instance just inserted: " ++ 
-                sopInstUid
+          getSopInstanceDb conn sopInstUid
 
 --------------------------------------------------------------------------------
 --
@@ -568,6 +557,7 @@ studyFromDicom dcm =
     Just desc -> Just (DicomStudy {studyUid=uid, studyDate=date,
       studyDescription=desc, studyPk=0, patientFk=0, studyPatient=nullPatient})
 
+--------------------------------------------------------------------------------
 --
 storeDicomFileToDb :: IConnection conn => conn -> FilePath -> DicomObject -> IO ()
 storeDicomFileToDb dbConn path dcm = do
@@ -587,14 +577,17 @@ storeDicomFileToDb dbConn path dcm = do
             Just rawSeries -> do
               dcmSeries <- insertSeriesDb dbConn rawSeries $ studyPk dcmStudy
               storeSopInstanceToDb dbConn path dcm dcmSeries
-              return ()
   
+--------------------------------------------------------------------------------
 --
 storeSopInstanceToDb :: IConnection conn => conn -> FilePath -> DicomObject -> DicomSeries -> IO ()
 storeSopInstanceToDb dbConn path dcm dcmSeries = do
-  sopInst <- insertSopInstanceDb dbConn path dcm $ seriesPk dcmSeries
-  let frameCount = sopInstanceFrameCount sopInst
-  -- Store one image per frame of sop instance
-  mapM_ (insertImageDb dbConn dcm (sopInstancePk sopInst)) [1..frameCount]
-  return ()
+  maybeSopInst <- insertSopInstanceDb dbConn path dcm $ seriesPk dcmSeries
+  case maybeSopInst of
+    Just sopInst -> do
+      let frameCount = sopInstanceFrameCount sopInst
+      -- Store one image per frame of sop instance
+      mapM_ (insertImageDb dbConn dcm (sopInstancePk sopInst)) [1..frameCount]
+      return ()
+    Nothing      -> return ()
   
