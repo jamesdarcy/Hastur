@@ -39,7 +39,9 @@ import Control.Monad
 import Data.Array
 import Data.Bits
 import Data.Int
+import Data.Word
 import qualified Data.Map as Map
+import qualified Data.ByteString as B
 import Database.HDBC
 import Graphics.UI.WX
 import Graphics.UI.WXCore
@@ -53,6 +55,7 @@ import System.Log.Handler (setFormatter)
 import System.Log.Formatter
 
 import Data.Dicom
+import Data.Dicom.Accessor
 import Data.Dicom.Io
 import Data.Dicom.Show
 import Data.Dicom.Tag
@@ -78,6 +81,7 @@ data HasturWidgets = HasturWidgets {
   guiSeriesList :: ListCtrl (),
   guiImageSlider :: Slider (),
   guiText :: TextCtrl (),
+  guiImage :: ScrolledWindow (),
   guiStatus :: StatusField
 }
 
@@ -92,7 +96,8 @@ gui :: IO ()
 gui = do
   -- Main UI components
   wgFrame <- frame [text := "Hastur",
-                    clientSize := sz width height]
+                    clientSize := sz width height,
+                    visible := False]
   wgHSplit <- splitterWindow wgFrame []
   wgStatus <- statusField [text := ""]
   wgDbTable <- listCtrl wgHSplit [
@@ -109,6 +114,7 @@ gui = do
   rawTab <- panel noteBook []
   imageTab <- panel noteBook []
   wgText <- textCtrl rawTab []
+  wgImage <- scrolledWindow imageTab [bgcolor := white, fullRepaintOnResize := False]
   studyIdMap <- varCreate Map.empty
   seriesIdMap <- varCreate Map.empty
   imageArray <- varCreate $ listArray (0,0) []
@@ -122,7 +128,7 @@ gui = do
   initDb conn
   dbConn <- varCreate $ ConnWrapper conn
 
-  let widgets = HasturWidgets wgFrame wgDbTable wgSeriesList imageSlider wgText wgStatus
+  let widgets = HasturWidgets wgFrame wgDbTable wgSeriesList imageSlider wgText wgImage wgStatus
   let guiCtx = HasturContext widgets studyIdMap seriesIdMap imageArray appDataDir dbConn
 
   -- Study "table"
@@ -136,6 +142,7 @@ gui = do
 
   -- Display area
   textCtrlSetEditable wgText False
+  set wgImage [on paint := onImagePaint guiCtx]
 
   -- Menus
   file <- menuPane [text := "&File"]
@@ -158,9 +165,9 @@ gui = do
                      container dispPanel $ column 0
                      [ tabs noteBook $
                        [ tab "Raw" $ container rawTab $ fill (widget wgText),
-                         tab "Image" $ container imageTab $ glue
+                         tab "Image" $ container imageTab $ fill (widget wgImage)
                        ],
-                       hfill $ minsize (sz 20 80) $ container sliderPanel $ 
+                       hfill $ minsize (sz 20 40) $ container sliderPanel $ 
                          hfill $ widget imageSlider
                      ]
                    )
@@ -174,7 +181,8 @@ gui = do
   splitterWindowSetSashPosition wgHSplit 300 True
   splitterWindowSetSashPosition wgVSplit 405 True
 
-  set wgFrame [on closing := onClose guiCtx]
+  set wgFrame [on closing := onClose guiCtx,
+               visible := True]
 
   showStudies conn studyIdMap wgDbTable
   
@@ -268,11 +276,20 @@ onOpenFile HasturContext {guiWidgets=hxw} = do
     Just path -> importDicomFile (guiText hxw) path
 
 --
+onImagePaint :: HasturContext -> DC () -> Rect -> IO ()
+onImagePaint HasturContext {guiWidgets=hxw, imageArray=ia} dc viewArea = do
+  idx <- sliderGetValue $ guiImageSlider hxw
+  imageArray <- varGet ia
+  showImagePixels dc (imageArray ! idx)
+  return ()
+
+--
 onImageSlider :: HasturContext -> IO ()
 onImageSlider HasturContext {guiWidgets=hxw, imageArray=ia} = do
   idx <- sliderGetValue $ guiImageSlider hxw
   imageArray <- varGet ia
   showImage (guiText hxw) $ imageArray ! idx
+  repaint (guiImage hxw)
   return ()
 
 --
@@ -322,6 +339,7 @@ onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, imageA
           sliderSetValue imageSlider 0
           set imageSlider [enabled := True]
           showImage (guiText hxw) $ head images
+          repaint (guiImage hxw)
           propagateEvent
         Nothing      -> propagateEvent
     otherwise        -> propagateEvent
@@ -382,6 +400,36 @@ showImage textCtl image = do
         Right encapDicom  -> do
           varSet (varDicom sopInst) (Just encapDicom)
           showEncapDicomObject textCtl encapDicom (sopInstancePath sopInst)
+          return ()
+
+--
+createWxImage :: DicomObject -> Maybe (IO (Image ()))
+createWxImage sopInst =
+  getColumns sopInst >>= \nX ->
+  getRows sopInst >>= \nY ->
+  getPixelData sopInst >>= \pixelData ->
+  Just (wxImageFromPixels nX nY pixelData)
+
+--
+wxImageFromPixels :: Word16 -> Word16 -> B.ByteString -> IO (Image ())
+wxImageFromPixels nX nY pixels = do
+  let rgbImage = map (\x -> rgb x x x) (extractInt16s pixels)
+  imageCreateFromPixels (sz (fromIntegral nX) (fromIntegral nY)) rgbImage
+
+--
+showImagePixels :: DC () -> DicomImage -> IO ()
+showImagePixels dc image = do
+  let sopInst = sopInstance image
+  maybeEncapDicom <- varGet $ varDicom sopInst
+  case maybeEncapDicom of
+    Nothing         -> return ()
+    Just encapDicom -> do
+      let maybeWxImage = createWxImage $ dicom encapDicom
+      case maybeWxImage of
+        Nothing      -> return ()
+        Just ioWxImage -> do
+          wxImage <- ioWxImage
+          drawImage dc wxImage pointZero []
           return ()
 
 --
