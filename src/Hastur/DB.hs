@@ -49,7 +49,7 @@ module Hastur.DB
 
 import Control.Monad (when)
 import Data.Int
-import qualified Data.Map as Map
+import qualified Data.Set as Set
 import Database.HDBC.Sqlite3
 import Database.HDBC
 import Graphics.UI.WX
@@ -59,6 +59,7 @@ import System.Log.Logger
 import Data.Dicom
 import Data.Dicom.Accessor
 import Data.Dicom.Tag
+import Data.Dicom.UID
 
 data DicomPatient = DicomPatient {
   patientName :: String,
@@ -98,6 +99,20 @@ data DicomImage = DicomImage {
   sopInstance :: DicomSopInstance,
   imageFrame :: Int32
   } deriving (Show)
+
+type UidSet = Set.Set UID
+
+getImageSopClassUidSet :: UidSet
+getImageSopClassUidSet =
+  Set.insert cT_IMAGE_STORAGE .
+  Set.insert eNHANCED_CT_IMAGE_STORAGE .
+  Set.insert eNHANCED_MR_IMAGE_STORAGE .
+  Set.insert eNHANCED_PET_IMAGE_STORAGE .
+  Set.insert mR_IMAGE_STORAGE .
+  Set.insert pOSITRON_EMISSION_TOMOGRAPHY_IMAGE_STORAGE .
+  Set.insert uLTRASOUND_IMAGE_STORAGE .
+  Set.insert uLTRASOUND_MULTIFRAME_IMAGE_STORAGE
+  $ Set.empty
 
 instance Show DicomSopInstance where
   show dsi = "DicomSopInstance { UID=\"" ++ (sopInstanceUid dsi) ++
@@ -388,6 +403,15 @@ insertStudyDb conn dcmStudy = do
 
 --------------------------------------------------------------------------------
 --
+isImageSopClass :: DicomObject -> Bool
+isImageSopClass dcm = do
+  let maybeUid = getSopClassUid dcm
+  case maybeUid of
+    Nothing  -> False
+    Just uid -> Set.member uid getImageSopClassUidSet
+
+--------------------------------------------------------------------------------
+--
 nullPatient :: DicomPatient
 nullPatient = DicomPatient { patientName="NULL", patientPk=0}
 
@@ -561,22 +585,25 @@ studyFromDicom dcm =
 --
 storeDicomFileToDb :: IConnection conn => conn -> FilePath -> DicomObject -> IO ()
 storeDicomFileToDb dbConn path dcm = do
-  let maybeStudy = studyFromDicom dcm
-  case maybeStudy of
-    Nothing -> return ()
-    Just rawStudy -> do
-      dcmStudy <- insertStudyDb dbConn rawStudy
-      let maybePatient = patientFromDicom dcm
-      case maybePatient of
+  if not $ isImageSopClass dcm
+    then return ()
+    else do
+      let maybeStudy = studyFromDicom dcm
+      case maybeStudy of
         Nothing -> return ()
-        Just rawPatient -> do
-          dcmPatient <- insertPatientDb dbConn rawPatient dcmStudy
-          let maybeSeries = seriesFromDicom dcm
-          case maybeSeries of
+        Just rawStudy -> do
+          dcmStudy <- insertStudyDb dbConn rawStudy
+          let maybePatient = patientFromDicom dcm
+          case maybePatient of
             Nothing -> return ()
-            Just rawSeries -> do
-              dcmSeries <- insertSeriesDb dbConn rawSeries $ studyPk dcmStudy
-              storeSopInstanceToDb dbConn path dcm dcmSeries
+            Just rawPatient -> do
+              dcmPatient <- insertPatientDb dbConn rawPatient dcmStudy
+              let maybeSeries = seriesFromDicom dcm
+              case maybeSeries of
+                Nothing -> return ()
+                Just rawSeries -> do
+                  dcmSeries <- insertSeriesDb dbConn rawSeries $ studyPk dcmStudy
+                  storeSopInstanceToDb dbConn path dcm dcmSeries
   
 --------------------------------------------------------------------------------
 --

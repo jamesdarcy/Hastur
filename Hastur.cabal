@@ -21,4 +21,4 @@ executable hastur
   hs-source-dirs:  src
   main-is:         Hastur.hs
 --  ghc-options:     -optl-mwindows
-  other-modules:   Hastur.DB
+  other-modules:   Hastur.DB, Hastur.Image

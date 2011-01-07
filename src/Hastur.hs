@@ -39,9 +39,7 @@ import Control.Monad
 import Data.Array
 import Data.Bits
 import Data.Int
-import Data.Word
 import qualified Data.Map as Map
-import qualified Data.ByteString as B
 import Database.HDBC
 import Graphics.UI.WX
 import Graphics.UI.WXCore
@@ -59,11 +57,15 @@ import Data.Dicom.Accessor
 import Data.Dicom.Io
 import Data.Dicom.Show
 import Data.Dicom.Tag
+import Data.Dicom.UID
 
 import Hastur.DB
+import Hastur.Image
 import Paths_hastur
 
+-- Map list control row ID (Int) to DB primary key (Int64)
 type ListDbMap = Map.Map Int Int64
+
 type ImageArray = Array Int DicomImage
 
 data HasturContext = HasturContext {
@@ -72,7 +74,10 @@ data HasturContext = HasturContext {
   dbSeriesMap :: Var (ListDbMap),
   imageArray :: Var (ImageArray),
   appDataDir :: Var (FilePath),
-  dbConn :: Var (ConnWrapper)
+  dbConn :: Var (ConnWrapper),
+  currImageIdx :: Var (Int),
+  currTabIdx :: Var (Int),
+  currSopInstUid :: Var (UID)
 }
 
 data HasturWidgets = HasturWidgets {
@@ -81,7 +86,7 @@ data HasturWidgets = HasturWidgets {
   guiSeriesList :: ListCtrl (),
   guiImageSlider :: Slider (),
   guiText :: TextCtrl (),
-  guiImage :: ScrolledWindow (),
+  guiImage :: Window (),
   guiStatus :: StatusField
 }
 
@@ -114,7 +119,7 @@ gui = do
   rawTab <- panel noteBook []
   imageTab <- panel noteBook []
   wgText <- textCtrl rawTab []
-  wgImage <- scrolledWindow imageTab [bgcolor := white, fullRepaintOnResize := False]
+  wgImage <- window imageTab [bgcolor := white, fullRepaintOnResize := False]
   studyIdMap <- varCreate Map.empty
   seriesIdMap <- varCreate Map.empty
   imageArray <- varCreate $ listArray (0,0) []
@@ -127,9 +132,13 @@ gui = do
   conn <- connectDb $ dir </> "hastur.db"
   initDb conn
   dbConn <- varCreate $ ConnWrapper conn
+  
+  currImageIdx <- varCreate $ negate 1
+  currTabIdx <- varCreate $ negate 1
+  currSopInstUid <- varCreate ""
 
   let widgets = HasturWidgets wgFrame wgDbTable wgSeriesList imageSlider wgText wgImage wgStatus
-  let guiCtx = HasturContext widgets studyIdMap seriesIdMap imageArray appDataDir dbConn
+  let guiCtx = HasturContext widgets studyIdMap seriesIdMap imageArray appDataDir dbConn currImageIdx currTabIdx currSopInstUid
 
   -- Study "table"
   set wgDbTable [on listEvent := onDbTableEvent guiCtx]
@@ -164,8 +173,8 @@ gui = do
                    (vsplit wgVSplit 3 400 (widget wgSeriesList) $
                      container dispPanel $ column 0
                      [ tabs noteBook $
-                       [ tab "Raw" $ container rawTab $ fill (widget wgText),
-                         tab "Image" $ container imageTab $ fill (widget wgImage)
+                       [ tab "Image" $ container imageTab $ fill (widget wgImage),
+                         tab "Raw" $ container rawTab $ fill (widget wgText)
                        ],
                        hfill $ minsize (sz 20 40) $ container sliderPanel $ 
                          hfill $ widget imageSlider
@@ -187,11 +196,37 @@ gui = do
   showStudies conn studyIdMap wgDbTable
   
 -- 
-clearSeriesSelection :: TextCtrl () -> Slider () -> IO ()
-clearSeriesSelection wgText imageSlider = do
-  textCtrlClear wgText
-  sliderSetRange imageSlider 0 0
-  set imageSlider [enabled := False]
+clearSeriesSelection :: HasturContext -> IO ()
+clearSeriesSelection ctx = do
+  let hxw = guiWidgets ctx
+  textCtrlClear (guiText hxw)
+  sliderSetRange (guiImageSlider hxw) 0 0
+  set (guiImageSlider hxw) [enabled := False]
+  varSet (currImageIdx ctx) $ negate 1
+
+--
+ensureEncapDicomLoaded :: DicomImage -> IO ()
+ensureEncapDicomLoaded image = do
+  let sopInst = sopInstance image
+  maybeEncapDicom <- varGet $ varDicom sopInst
+  case maybeEncapDicom of
+    Just encapDicom -> return ()
+    Nothing         -> do
+      eitherDicom <- readDicomFile $ sopInstancePath sopInst 
+      case eitherDicom of
+        Left errorMessage -> do
+          infoM "Hastur" $ "Error reading DICOM file: " ++ 
+            (sopInstancePath sopInst) ++ " - " ++ errorMessage
+        Right encapDicom  -> do
+          varSet (varDicom sopInst) (Just encapDicom)
+
+--
+fetchImages :: IConnection conn => conn -> Int64 -> IO ([DicomImage])
+fetchImages dbConn seriesPk = do
+  wxcBeginBusyCursor
+  images <- searchImages dbConn seriesPk
+  wxcEndBusyCursor
+  return images
 
 -- This function takes a name and, with a little knowledge and the help of
 -- cabal, returns the path of that image
@@ -252,17 +287,19 @@ onClose HasturContext {dbConn=dbc} = do
 
 --
 onDbTableEvent :: HasturContext -> EventList -> IO ()
-onDbTableEvent HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbSeriesMap=seriesIdMap, dbConn=dbc} event =
+onDbTableEvent ctx event =
   case event of
     ListItemSelected idx -> do
-      clearSeriesSelection (guiText hxw) (guiImageSlider hxw)
+      clearSeriesSelection ctx
+      let hxw = guiWidgets ctx
       studyId <- listCtrlGetItemData (guiDbTable hxw) idx
-      idMap <- varGet studyIdMap
+      idMap <- varGet (dbStudyMap ctx)
       let maybePk = Map.lookup studyId idMap
       case maybePk of
         Just studyPk -> do
-          dbConn <- varGet dbc
-          showSeries dbConn studyPk seriesIdMap (guiSeriesList hxw)
+          dbc <- varGet (dbConn ctx)
+          showSeries dbc studyPk (dbSeriesMap ctx) (guiSeriesList hxw)
+          selectSeries ctx 0
           propagateEvent
         Nothing      -> propagateEvent
     otherwise        -> propagateEvent
@@ -277,20 +314,25 @@ onOpenFile HasturContext {guiWidgets=hxw} = do
 
 --
 onImagePaint :: HasturContext -> DC () -> Rect -> IO ()
-onImagePaint HasturContext {guiWidgets=hxw, imageArray=ia} dc viewArea = do
-  idx <- sliderGetValue $ guiImageSlider hxw
-  imageArray <- varGet ia
-  showImagePixels dc (imageArray ! idx)
-  return ()
+onImagePaint ctx dc viewArea = do
+  currIdx <- varGet (currImageIdx ctx)
+  if currIdx >= 0
+    then do
+      let hxw = guiWidgets ctx
+      idx <- sliderGetValue (guiImageSlider hxw)
+      ia <- varGet (imageArray ctx)
+      showImagePixels dc (ia ! idx)
+    else dcClear dc
 
 --
 onImageSlider :: HasturContext -> IO ()
-onImageSlider HasturContext {guiWidgets=hxw, imageArray=ia} = do
-  idx <- sliderGetValue $ guiImageSlider hxw
-  imageArray <- varGet ia
-  showImage (guiText hxw) $ imageArray ! idx
+onImageSlider ctx = do
+  let hxw = guiWidgets ctx
+  idx <- sliderGetValue (guiImageSlider hxw)
+  varSet (currImageIdx ctx) idx
+  ia <- varGet (imageArray ctx)
   repaint (guiImage hxw)
-  return ()
+  showImage ctx (ia ! idx)
 
 --
 onImport :: HasturContext -> IO ()
@@ -322,26 +364,12 @@ onImportRecurse HasturContext {guiWidgets=hxw, dbStudyMap=studyIdMap, dbConn=dbc
 
 --
 onSeriesListEvent :: HasturContext -> EventList -> IO ()
-onSeriesListEvent HasturContext {guiWidgets=hxw, dbSeriesMap=seriesIdMap, imageArray=ia, dbConn=dbc} event =
+onSeriesListEvent ctx event =
   case event of
     ListItemSelected idx -> do
-      seriesId <- listCtrlGetItemData (guiSeriesList hxw) idx
-      idMap <- varGet seriesIdMap
-      let maybePk = Map.lookup seriesId idMap
-      case maybePk of
-        Just seriesPk -> do
-          dbConn <- varGet dbc
-          images <- fetchImages dbConn seriesPk
-          let nImages = length images
-          varSet ia $ listArray (0,nImages-1) images
-          let imageSlider = guiImageSlider hxw
-          sliderSetRange imageSlider 0 (nImages-1)
-          sliderSetValue imageSlider 0
-          set imageSlider [enabled := True]
-          showImage (guiText hxw) $ head images
-          repaint (guiImage hxw)
-          propagateEvent
-        Nothing      -> propagateEvent
+      let hxw = guiWidgets ctx
+      selectSeries ctx idx
+      propagateEvent
     otherwise        -> propagateEvent
 
 --
@@ -358,15 +386,33 @@ scanDirectory dbConn recurse path = do
     else do
       dirs <- filterM doesDirectoryExist fullPathContents
       mapM_ (scanDirectory dbConn True) dirs
-      return ()
   
---
-fetchImages :: IConnection conn => conn -> Int64 -> IO ([DicomImage])
-fetchImages dbConn seriesPk = do
-  wxcBeginBusyCursor
-  images <- searchImages dbConn seriesPk
-  wxcEndBusyCursor
-  return images
+-- 
+selectSeries :: HasturContext -> Int -> IO ()
+selectSeries ctx idx = do
+  let hxw = guiWidgets ctx
+  itemCount <- listCtrlGetItemCount (guiSeriesList hxw)
+  infoM "Hastur" $ "Item count: " ++ show itemCount
+  if itemCount > 0
+    then do
+      seriesId <- listCtrlGetItemData (guiSeriesList hxw) idx
+      idMap <- varGet (dbSeriesMap ctx)
+      let maybePk = Map.lookup seriesId idMap
+      case maybePk of
+        Just seriesPk -> do
+          dbc <- varGet (dbConn ctx)
+          images <- fetchImages dbc seriesPk
+          let nImages = length images
+          varSet (imageArray ctx) $ listArray (0,nImages-1) images
+          let imageSlider = guiImageSlider hxw
+          sliderSetRange imageSlider 0 (nImages-1)
+          sliderSetValue imageSlider 0
+          set imageSlider [enabled := True]
+          varSet (currImageIdx ctx) 0
+          showImage ctx $ head images
+          repaint (guiImage hxw)
+        Nothing      -> return ()
+    else return ()
 
 --
 showEncapDicomObject :: TextCtrl t -> EncapDicomObject -> FilePath -> IO ()
@@ -377,60 +423,49 @@ showEncapDicomObject textCtl dicom path = do
   textCtrlShowPosition textCtl 0
 
 --
-showImage :: TextCtrl t -> DicomImage -> IO ()
-showImage textCtl image = do
+showImage :: HasturContext -> DicomImage -> IO ()
+showImage ctx image = do
+  let textCtl = guiText (guiWidgets ctx)
   let sopInst = sopInstance image
-  maybeEncapDicom <- varGet $ varDicom sopInst
-  case maybeEncapDicom of
-    Just encapDicom -> do
-      showEncapDicomObject textCtl encapDicom (sopInstancePath sopInst)
-      return ()
-    Nothing         -> do
-      eitherDicom <- readDicomFile $ sopInstancePath sopInst 
-      case eitherDicom of
-        Left errorMessage -> do
-          infoM "Hastur" $ "Error reading DICOM file: " ++ 
-            (sopInstancePath sopInst) ++ " - " ++ errorMessage
+  currUid <- varGet (currSopInstUid ctx)
+  if currUid /= sopInstanceUid sopInst
+    then do
+      infoM "Hastur" $ "Rendering SOP instance to text: " ++ (show $ sopInstancePath sopInst) ++
+        " Frame: " ++ (show $ imageFrame image)
+      ensureEncapDicomLoaded image
+      maybeEncapDicom <- varGet $ varDicom sopInst
+      case maybeEncapDicom of
+        Just encapDicom -> do
+          varSet (currSopInstUid ctx) (sopInstanceUid sopInst)
+          showEncapDicomObject textCtl encapDicom (sopInstancePath sopInst)
+        Nothing         -> do
           textCtrlSetValue textCtl $ "*** DICOM: " ++
             (sopInstancePath sopInst) ++ " ***\n"
-          textCtrlAppendText textCtl errorMessage
+          textCtrlAppendText textCtl "\n***\n*** Unable to load file\n***"
           textCtrlAppendText textCtl "\n*** [End] ***"
           textCtrlShowPosition textCtl 0
-          return ()
-        Right encapDicom  -> do
-          varSet (varDicom sopInst) (Just encapDicom)
-          showEncapDicomObject textCtl encapDicom (sopInstancePath sopInst)
-          return ()
-
---
-createWxImage :: DicomObject -> Maybe (IO (Image ()))
-createWxImage sopInst =
-  getColumns sopInst >>= \nX ->
-  getRows sopInst >>= \nY ->
-  getPixelData sopInst >>= \pixelData ->
-  Just (wxImageFromPixels nX nY pixelData)
-
---
-wxImageFromPixels :: Word16 -> Word16 -> B.ByteString -> IO (Image ())
-wxImageFromPixels nX nY pixels = do
-  let rgbImage = map (\x -> rgb x x x) (extractInt16s pixels)
-  imageCreateFromPixels (sz (fromIntegral nX) (fromIntegral nY)) rgbImage
-
+    else return ()
 --
 showImagePixels :: DC () -> DicomImage -> IO ()
 showImagePixels dc image = do
+  ensureEncapDicomLoaded image
   let sopInst = sopInstance image
+  infoM "Hastur" $ "Painting image: " ++ (show $ sopInstancePath sopInst) ++
+    " Frame: " ++ (show $ imageFrame image)
   maybeEncapDicom <- varGet $ varDicom sopInst
   case maybeEncapDicom of
     Nothing         -> return ()
     Just encapDicom -> do
-      let maybeWxImage = createWxImage $ dicom encapDicom
-      case maybeWxImage of
-        Nothing      -> return ()
-        Just ioWxImage -> do
-          wxImage <- ioWxImage
-          drawImage dc wxImage pointZero []
-          return ()
+      let dcm = dicom encapDicom
+      if isRenderable dcm 
+        then do
+          let maybeWxImage = createWxImage dcm
+          case maybeWxImage of
+            Nothing        -> return ()
+            Just ioWxImage -> do
+              wxImage <- ioWxImage
+              drawImage dc wxImage pointZero []
+        else infoM "Hastur" $ "Not renderable"
 
 --
 showSeries :: IConnection conn => conn -> Int64 -> Var (ListDbMap) -> ListCtrl l -> IO ()
@@ -443,7 +478,6 @@ showSeries dbConn studyPk varMap wgSeriesList = do
   varSet varMap seriesIdMap
   mapM_ (showSingleSeries wgSeriesList) $ zip (Map.keys seriesIdMap) series
   wxcEndBusyCursor
-  return ()
 
 --
 showSingleSeries :: ListCtrl l -> (Int,DicomSeries) -> IO ()
@@ -465,7 +499,6 @@ showStudies dbConn varMap wgDbTable = do
   varSet varMap studyIdMap
   mapM_ (showStudy wgDbTable) $ zip (Map.keys studyIdMap) studies
   wxcEndBusyCursor
-  return ()
 
 --
 showStudy :: ListCtrl l -> (Int,DicomStudy) -> IO ()
