@@ -1,5 +1,5 @@
 {-
-Copyright James d'Arcy 2011
+Copyright James d'Arcy 2010
 
 All rights reserved.
 
@@ -31,59 +31,63 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -}
 
-
-module Hastur.Image
-  ( createWxImage,
-    isRenderable
+module Hastur.Types
+  (
+    DicomPatient(..),
+    DicomStudy(..),
+    DicomSeries(..),
+    DicomSopInstance(..),
+    DicomImage(..)
   ) where
 
-import qualified Data.ByteString as B
 import Data.Int
-import qualified Data.Set as Set
-import Data.Word
-import Graphics.UI.WX
-import Graphics.UI.WXCore
-
-import Hastur.Types
+import Graphics.UI.WX (Var)
 
 import Data.Dicom
-import Data.Dicom.Accessor
-import Data.Dicom.Tag
-import Data.Dicom.UID
 
-type UidSet = Set.Set UID
+data DicomPatient = DicomPatient {
+  patientName :: String,
+  patientPk :: Int64
+  } deriving (Show)
 
---
-createWxImage :: Int32 -> DicomObject -> Maybe (IO (Image ()))
-createWxImage frameIdx dcm =
-  getColumns dcm >>= \nX ->
-  getRows dcm >>= \nY ->
-  getPixelData dcm >>= \pixelData ->
-  Just (wxImageFromPixels frameIdx nX nY pixelData)
+data DicomStudy = DicomStudy {
+  studyUid :: String,
+  studyDate :: String,
+  studyDescription :: String,
+  studyPk :: Int64,
+  patientFk :: Int64,
+  studyPatient :: DicomPatient
+  } deriving (Show)
 
---
-isRenderable :: DicomObject -> Bool
-isRenderable dcm = do
-  let maybeUid = getSopClassUid dcm
-  case maybeUid of
-    Nothing  -> False
-    Just uid -> Set.member uid renderableSopClassUidSet
+data DicomSeries = DicomSeries {
+  seriesUid :: String,
+  seriesDescription :: String,
+  seriesNumber :: Int32,
+  modality :: String,
+  seriesPk :: Int64,
+  studyFk :: Int64
+  } deriving (Show)
 
---
-renderableSopClassUidSet :: UidSet
-renderableSopClassUidSet =
-  Set.insert cT_IMAGE_STORAGE .
-  Set.insert mR_IMAGE_STORAGE .
-  Set.insert eNHANCED_MR_IMAGE_STORAGE .
-  Set.insert pOSITRON_EMISSION_TOMOGRAPHY_IMAGE_STORAGE .
-  Set.insert uLTRASOUND_IMAGE_STORAGE
-  $ Set.empty
+data DicomSopInstance = DicomSopInstance {
+  sopInstancePath :: String,
+  sopInstanceUid :: String,
+  sopInstancePk :: Int64,
+  seriesFk :: Int64,
+  sopInstanceFrameCount :: Int32,
+  varDicom :: Var (Maybe EncapDicomObject)
+  }
 
---
-wxImageFromPixels :: Int32 -> Word16 -> Word16 -> B.ByteString -> IO (Image ())
-wxImageFromPixels frame nX nY pixels = do
-  let intNx = fromIntegral nX
-  let intNy = fromIntegral nY
-  let rgbImage = map (\x -> rgb x x x) (extractInt16s (fromIntegral frame) (intNx*intNy*2) pixels)
-  imageCreateFromPixels (sz intNx intNy) rgbImage
+data DicomImage = DicomImage {
+  imageUid :: String,
+  sopInstanceFk :: Int64,
+  sopInstance :: DicomSopInstance,
+  imageFrame :: Int32
+  } deriving (Show)
 
+instance Show DicomSopInstance where
+  show dsi = "DicomSopInstance { UID=\"" ++ (sopInstanceUid dsi) ++
+    "\", Key=\"" ++ show (sopInstancePk dsi) ++ "\", Series Key=\"" ++
+    show (seriesFk dsi) ++ "\", Frame Count=\"" ++ show (sopInstanceFrameCount dsi) ++
+    "\", Path=\"" ++ (sopInstancePath dsi) ++ "\" }"
+
+  

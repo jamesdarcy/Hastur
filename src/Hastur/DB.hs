@@ -33,11 +33,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 module Hastur.DB
   (
-    DicomPatient(..),
-    DicomStudy(..),
-    DicomSeries(..),
-    DicomSopInstance(..),
-    DicomImage(..),
     connectDb,
     initDb,
     closeDb,
@@ -56,49 +51,12 @@ import Graphics.UI.WX
 import System.FilePath
 import System.Log.Logger
 
+import Hastur.Types
+
 import Data.Dicom
 import Data.Dicom.Accessor
 import Data.Dicom.Tag
 import Data.Dicom.UID
-
-data DicomPatient = DicomPatient {
-  patientName :: String,
-  patientPk :: Int64
-  } deriving (Show)
-
-data DicomStudy = DicomStudy {
-  studyUid :: String,
-  studyDate :: String,
-  studyDescription :: String,
-  studyPk :: Int64,
-  patientFk :: Int64,
-  studyPatient :: DicomPatient
-  } deriving (Show)
-
-data DicomSeries = DicomSeries {
-  seriesUid :: String,
-  seriesDescription :: String,
-  seriesNumber :: Int32,
-  modality :: String,
-  seriesPk :: Int64,
-  studyFk :: Int64
-  } deriving (Show)
-
-data DicomSopInstance = DicomSopInstance {
-  sopInstancePath :: String,
-  sopInstanceUid :: String,
-  sopInstancePk :: Int64,
-  seriesFk :: Int64,
-  sopInstanceFrameCount :: Int32,
-  varDicom :: Var (Maybe EncapDicomObject)
-  }
-
-data DicomImage = DicomImage {
-  imageUid :: String,
-  sopInstanceFk :: Int64,
-  sopInstance :: DicomSopInstance,
-  imageFrame :: Int32
-  } deriving (Show)
 
 type UidSet = Set.Set UID
 
@@ -113,12 +71,6 @@ getImageSopClassUidSet =
   Set.insert uLTRASOUND_IMAGE_STORAGE .
   Set.insert uLTRASOUND_MULTIFRAME_IMAGE_STORAGE
   $ Set.empty
-
-instance Show DicomSopInstance where
-  show dsi = "DicomSopInstance { UID=\"" ++ (sopInstanceUid dsi) ++
-    "\", Key=\"" ++ show (sopInstancePk dsi) ++ "\", Series Key=\"" ++
-    show (seriesFk dsi) ++ "\", Frame Count=\"" ++ show (sopInstanceFrameCount dsi) ++
-    "\", Path=\"" ++ (sopInstancePath dsi) ++ "\" }"
 
 --------------------------------------------------------------------------------
 --
@@ -614,7 +566,7 @@ storeSopInstanceToDb dbConn path dcm dcmSeries = do
     Just sopInst -> do
       let frameCount = sopInstanceFrameCount sopInst
       -- Store one image per frame of sop instance
-      mapM_ (insertImageDb dbConn dcm (sopInstancePk sopInst)) [1..frameCount]
+      mapM_ (insertImageDb dbConn dcm (sopInstancePk sopInst)) [0..(frameCount-1)]
       return ()
     Nothing      -> return ()
   

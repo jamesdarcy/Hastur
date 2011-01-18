@@ -61,6 +61,7 @@ import Data.Dicom.UID
 
 import Hastur.DB
 import Hastur.Image
+import Hastur.Types
 import Paths_hastur
 
 -- Map list control row ID (Int) to DB primary key (Int64)
@@ -459,7 +460,7 @@ showImagePixels dc image = do
       let dcm = dicom encapDicom
       if isRenderable dcm 
         then do
-          let maybeWxImage = createWxImage dcm
+          let maybeWxImage = createWxImage (imageFrame image) dcm
           case maybeWxImage of
             Nothing        -> return ()
             Just ioWxImage -> do
